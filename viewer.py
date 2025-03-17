@@ -34,6 +34,130 @@ from indexer import Indexer
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
+class ThemeManager:
+    def __init__(self):
+        self.is_dark = True
+        self._dark_theme = """
+            QMainWindow, QWidget {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #ffffff;
+            }
+            QLineEdit {
+                background-color: #3b3b3b;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QComboBox {
+                background-color: #3b3b3b;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: url(down_arrow_white.png);
+            }
+            QPushButton {
+                background-color: #4b4b4b;
+                color: #ffffff;
+                border: 1px solid #555555;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #5b5b5b;
+            }
+            QScrollArea {
+                background-color: #2b2b2b;
+                border: 1px solid #555555;
+            }
+            QFrame {
+                background-color: #3b3b3b;
+                border: 1px solid #555555;
+                border-radius: 3px;
+            }
+            QMenu {
+                background-color: #3b3b3b;
+                color: #ffffff;
+                border: 1px solid #555555;
+            }
+            QMenu::item:selected {
+                background-color: #4b4b4b;
+            }
+        """
+        self._light_theme = """
+            QMainWindow, QWidget {
+                background-color: #ffffff;
+                color: #000000;
+            }
+            QLabel {
+                color: #000000;
+            }
+            QLineEdit {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #cccccc;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QComboBox {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #cccccc;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: url(down_arrow_black.png);
+            }
+            QPushButton {
+                background-color: #f0f0f0;
+                color: #000000;
+                border: 1px solid #cccccc;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+            }
+            QScrollArea {
+                background-color: #ffffff;
+                border: 1px solid #cccccc;
+            }
+            QFrame {
+                background-color: #f5f5f5;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+            }
+            QMenu {
+                background-color: #ffffff;
+                color: #000000;
+                border: 1px solid #cccccc;
+            }
+            QMenu::item:selected {
+                background-color: #e0e0e0;
+            }
+        """
+
+    def get_current_theme(self):
+        return self._dark_theme if self.is_dark else self._light_theme
+
+    def toggle_theme(self):
+        self.is_dark = not self.is_dark
+        return self.get_current_theme()
+
+
 class ImageQueryLineEdit(QLineEdit):
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
@@ -118,6 +242,7 @@ class ImageViewer(QMainWindow):
         super().__init__()
 
         self.executor = ThreadPoolExecutor()
+        self.theme_manager = ThemeManager()
 
         self.indexer = Indexer()
 
@@ -142,9 +267,16 @@ class ImageViewer(QMainWindow):
         # Row 1: Query controls
         #
         query_layout = QHBoxLayout()
+        
+        # Theme toggle button
+        self.theme_button = QPushButton("Toggle Theme")
+        self.theme_button.clicked.connect(self.toggle_theme)
+        query_layout.addWidget(self.theme_button)
+        
         # Query label
         label_query = QLabel("Query:")
         query_layout.addWidget(label_query)
+        
         # Query entry with image paste support
         self.query_entry = ImageQueryLineEdit(self)
         self.query_entry.returnPressed.connect(
@@ -159,6 +291,8 @@ class ImageViewer(QMainWindow):
         self.top_k_combobox = QComboBox()
         self.top_k_combobox.addItems([str(x) for x in [21, 28, 35, 42, 49, 56, 63, 70, 77, 84, 91, 98]])
         self.top_k_combobox.setCurrentText("49")
+        self.top_k_combobox.setMinimumWidth(60)  # Set minimum width to fit all numbers
+        self.top_k_combobox.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)  # Adjust to content width
         query_layout.addWidget(self.top_k_combobox)
 
         # Search button
@@ -191,13 +325,18 @@ class ImageViewer(QMainWindow):
         self.loading_overlay = QLabel(self)
         self.loading_overlay.setText("Loading…")
         self.loading_overlay.setStyleSheet(
-            "QLabel { background-color: rgba(0,0,0,0.4); color: white; font-size: 24px; }"
+            "QLabel { background-color: rgba(0,0,0,0.4); "
+            f"color: {'white' if self.theme_manager.is_dark else 'black'}; "
+            "font-size: 24px; }"
         )
         self.loading_overlay.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.loading_overlay.setVisible(False)
         self.loading_overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         # Manually ensure it covers the entire window:
         self.resizeEvent(QResizeEvent(self.size(), self.size()))
+
+        # Apply initial theme
+        self.setStyleSheet(self.theme_manager.get_current_theme())
 
     def resizeEvent(self, event):
         """
@@ -404,6 +543,17 @@ class ImageViewer(QMainWindow):
     def on_image_click(self, _, image_path):
         """Called when the user clicks on an image label."""
         self.open_image_in_viewer(image_path)
+
+    def toggle_theme(self):
+        """Toggle between light and dark themes"""
+        new_theme = self.theme_manager.toggle_theme()
+        self.setStyleSheet(new_theme)
+        # Update loading overlay style
+        self.loading_overlay.setStyleSheet(
+            "QLabel { background-color: rgba(0,0,0,0.4); "
+            f"color: {'white' if self.theme_manager.is_dark else 'black'}; "
+            "font-size: 24px; }"
+        )
 
 
 async def main_async():
