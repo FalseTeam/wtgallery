@@ -7,7 +7,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 import qasync
 from PIL import Image, ImageFile
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QImage, QResizeEvent
+from PySide6.QtGui import QPixmap, QImage, QResizeEvent, QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QFrame,
     QSizePolicy,
+    QMenu,
 )
 
 from config import EMBEDDINGS_DIR
@@ -29,6 +30,26 @@ from indexer import Indexer
 
 # If you need to allow truncated images:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+class ClickableImageLabel(QLabel):
+    def __init__(self, image_path: str, viewer, parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.viewer = viewer
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def show_context_menu(self, position):
+        menu = QMenu()
+        open_action = menu.addAction("Open in Viewer")
+        find_similar_action = menu.addAction("Find Similar Images")
+        
+        action = menu.exec(QCursor.pos())
+        if action == open_action:
+            self.viewer.on_image_click(None, self.image_path)
+        elif action == find_similar_action:
+            asyncio.create_task(self.viewer.search_similar_images(self.image_path))
 
 
 class ImageViewer(QMainWindow):
@@ -232,12 +253,10 @@ class ImageViewer(QMainWindow):
             qimage = QImage(rgba_bytes, w, h, QImage.Format.Format_RGBA8888)
             pixmap = QPixmap.fromImage(qimage)
 
-            image_label = QLabel()
+            # Use our custom ClickableImageLabel instead of QLabel
+            image_label = ClickableImageLabel(image_path, self)
             image_label.setPixmap(pixmap)
             image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            image_label.mousePressEvent = (
-                lambda event, p=image_path: self.on_image_click(event, p)
-            )
             cell_frame.layout().addWidget(image_label)
 
             # Add file name
@@ -287,6 +306,39 @@ class ImageViewer(QMainWindow):
             col = i % num_columns
             self.gallery_layout.addWidget(item, row, col)
 
+    async def search_similar_images(self, query_image_path: str):
+        """Search for images similar to the selected image."""
+        self.show_overlay()
+        # Let the overlay actually repaint:
+        await asyncio.sleep(0)
+
+        top_k = int(self.top_k_combobox.currentText())
+
+        #
+        # 1) Run your search in a background thread
+        #
+        loop = asyncio.get_event_loop()
+        sorted_images = await loop.run_in_executor(
+            self.executor,
+            self.indexer.search_images_by_image, self.loaded_image_embeddings, query_image_path
+        )
+
+        # Just for safety: limit top_k
+        sorted_images = sorted_images[:top_k]
+
+        #
+        # 2) Load and thumbnail images in background
+        #
+        image_paths = [x[0] for x in sorted_images]  # each x is (image_path, similarity_score)
+        thumbs = await self.generate_thumbnails(image_paths)
+
+        #
+        # 3) Update the gallery in the main thread
+        #
+        self.create_gallery(sorted_images, thumbs)
+        self.scroll_area.verticalScrollBar().setValue(0)
+
+        self.hide_overlay()
 
     def on_image_click(self, _, image_path):
         """Called when the user clicks on an image label."""

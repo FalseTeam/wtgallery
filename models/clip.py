@@ -93,6 +93,54 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
             if self.device != 'cpu':
                 torch.cuda.empty_cache()
 
+    def search_images_by_image(
+            self,
+            image_embeddings: dict[str, torch.Tensor],
+            query_image_path: str
+    ) -> list[tuple[str, float]]:
+        """
+        Search for similar images using an image as the query.
+
+        Args:
+            image_embeddings (dict[str, torch.Tensor]): Dictionary mapping image paths to their respective embeddings.
+            query_image_path (str): Path to the query image.
+
+        Returns:
+            list[tuple[str, float]]: List of tuples, where each tuple contains the image path and its similarity score to the query image.
+        """
+        try:
+            # Load and get features for the query image
+            query_image = self.load_image(query_image_path)
+            if query_image is None:
+                return []
+
+            query_image = query_image.to(self.device)
+            
+            with torch.no_grad():
+                query_features = self.model.to(self.device).get_image_features(pixel_values=query_image)
+
+            # image search
+            similarity_scores = {}
+            for image_path, image_features in image_embeddings.items():
+                if image_path == query_image_path:  # Skip the query image itself
+                    continue
+                    
+                # Move image features to the same device as query features
+                image_features = image_features.to(self.device)
+                # Calculate cosine similarity
+                similarity_score = torch.nn.functional.cosine_similarity(image_features.unsqueeze(0), query_features)
+                similarity_score = similarity_score.mean().item()
+                similarity_scores[image_path] = similarity_score
+
+            # Sort images based on similarity scores
+            sorted_images = sorted(similarity_scores.items(), key=lambda item: item[1], reverse=True)
+
+            return sorted_images
+        finally:
+            # Clean up GPU memory regardless of device type
+            if self.device != 'cpu':
+                torch.cuda.empty_cache()
+
     # noinspection PyTypeChecker
     def create_image_embeddings_from_paths(self, image_paths: List[str]) -> Dict[str, Tensor]:
         image_embeddings = dict()

@@ -39,6 +39,23 @@ class Indexer:
         """
         return self.clip_model_wrapper.search_images_by_text(image_embeddings, text_query)
 
+    def search_images_by_image(
+            self,
+            image_embeddings: dict[str, torch.Tensor],
+            query_image_path: str
+    ) -> list[tuple[str, float]]:
+        """
+        Search for images in the given image embeddings that are most similar to the given query image.
+
+        Args:
+            image_embeddings (dict[str, torch.Tensor]): Dictionary mapping image paths to their respective embeddings.
+            query_image_path (str): Path to the query image.
+
+        Returns:
+            list[tuple[str, float]]: List of tuples, where each tuple contains the image path and its similarity score to the query image.
+        """
+        return self.clip_model_wrapper.search_images_by_image(image_embeddings, query_image_path)
+
     def update_image_embeddings(
             self,
             existing_embeddings: dict[str, torch.Tensor],
