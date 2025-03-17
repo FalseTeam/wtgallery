@@ -136,13 +136,15 @@ class ImageViewer(QMainWindow):
     def open_image_in_viewer(image_path: str) -> None:
         """Cross-platform attempt to open image in default viewer."""
         try:
-            if os.name == "nt":
-                subprocess.run(["explorer", image_path], check=True)
-            elif os.name == "posix":
+            if os.name == "nt":  # Windows
+                os.startfile(image_path)
+            elif sys.platform == "darwin":  # macOS
+                subprocess.run(["open", image_path], check=True)
+            elif os.name == "posix":  # Linux and other Unix-like
                 subprocess.run(["xdg-open", image_path], check=True)
             else:
                 print("Unsupported OS. Unable to open the image in the default viewer.")
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OSError) as e:
             print(f"Error opening image '{image_path}' in the default image viewer: {e}")
 
     async def search_and_update_gallery(self):

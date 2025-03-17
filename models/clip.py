@@ -61,6 +61,38 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
         image_paths = [os.path.join(image_folder, file) for file in os.listdir(image_folder) if is_image_file(file)]
         return self.create_image_embeddings_from_paths(image_paths)
 
+    def search_images_by_text(
+            self,
+            image_embeddings: dict[str, torch.Tensor],
+            text_query: str
+    ) -> list[tuple[str, float]]:
+        try:
+            # Encode the text query
+            inputs = self.processor(text_query, return_tensors="pt")
+            # Move inputs to the correct device
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            # Get text features on the correct device
+            text_features = self.model.to(self.device).get_text_features(**inputs)
+            text_features = text_features.unsqueeze(0)  # Add a batch dimension
+
+            # image search
+            similarity_scores = {}
+            for image_path, image_features in image_embeddings.items():
+                # Move image features to the same device as text features
+                image_features = image_features.to(self.device).unsqueeze(0)  # Add a batch dimension
+                similarity_score = torch.nn.functional.cosine_similarity(image_features, text_features)
+                similarity_score = similarity_score.mean().item()  # Compute mean similarity score
+                similarity_scores[image_path] = similarity_score
+
+            # Sort images based on similarity scores
+            sorted_images = sorted(similarity_scores.items(), key=lambda item: item[1], reverse=True)
+
+            return sorted_images
+        finally:
+            # Clean up GPU memory regardless of device type
+            if self.device != 'cpu':
+                torch.cuda.empty_cache()
+
     # noinspection PyTypeChecker
     def create_image_embeddings_from_paths(self, image_paths: List[str]) -> Dict[str, Tensor]:
         image_embeddings = dict()
@@ -88,30 +120,8 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
 
             finally:
                 del batch_images, batch_image_features
-                if self.device == 'cuda':
-                    torch.cuda.empty_cache()  # Clear GPU memory
+                # Clean up GPU memory regardless of device type
+                if self.device != 'cpu':
+                    torch.cuda.empty_cache()
 
         return image_embeddings
-
-    def search_images_by_text(
-            self,
-            image_embeddings: dict[str, torch.Tensor],
-            text_query: str
-    ) -> list[tuple[str, float]]:
-        # Encode the text query
-        inputs = self.processor(text_query, return_tensors="pt")
-        text_features = self.model.get_text_features(**inputs)
-        text_features = text_features.unsqueeze(0)  # Add a batch dimension
-
-        # image search
-        similarity_scores = {}
-        for image_path, image_features in image_embeddings.items():
-            image_features = image_features.unsqueeze(0)  # Add a batch dimension
-            similarity_score = torch.nn.functional.cosine_similarity(image_features, text_features)
-            similarity_score = similarity_score.mean().item()  # Compute mean similarity score
-            similarity_scores[image_path] = similarity_score
-
-        # Sort images based on similarity scores
-        sorted_images = sorted(similarity_scores.items(), key=lambda item: item[1], reverse=True)
-
-        return sorted_images
