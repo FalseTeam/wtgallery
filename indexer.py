@@ -8,15 +8,15 @@ import torch
 
 from config import EMBEDDINGS_DIR
 from models import CLIP
+from utils import logcfg
+from utils.logged import Logged
+from utils.validator import is_image_file
 
 
-def is_image_file(filename: str) -> bool:
-    return any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif'])
-
-
-class Indexer:
+class Indexer(Logged):
 
     def __init__(self, clip_model=CLIP.LaionH14):
+        Logged.__init__(self)
         self.clip_model_wrapper = clip_model
 
     def create_image_embeddings(self, image_folder: str) -> dict[str, torch.Tensor]:
@@ -78,16 +78,16 @@ class Indexer:
         images_to_add = new_image_paths - current_image_paths
 
         if not images_to_add:
-            print("No new images to be processed")
+            self.info("No new images to be processed")
             return existing_embeddings
 
-        print(f"Found {len(images_to_add)} new images to be processed")
+        self.info(f"Found {len(images_to_add)} new images to be processed")
 
         new_embeddings = self.clip_model_wrapper.create_image_embeddings_from_paths(list(images_to_add))
 
         # Merge the existing and new embeddings
         updated_embeddings = {**existing_embeddings, **new_embeddings}
-        print(f"Updated image embeddings from {len(existing_embeddings)} to {len(updated_embeddings)}")
+        self.info(f"Updated image embeddings from {len(existing_embeddings)} to {len(updated_embeddings)}")
 
         return updated_embeddings
 
@@ -101,7 +101,12 @@ class Indexer:
         return image_embeddings
 
     def index(self, image_folder: str):
-        print(f"Processing {image_folder}")
+        image_folder = Path(image_folder)
+        if not image_folder.is_dir():
+            self.warning(f"Directory not found: {image_folder}")
+            return
+
+        self.info(f"Processing {image_folder}")
         embeddings_name = re.sub(
             pattern=r'[ ,.:()\[\]{}\\/]+', repl='-',
             string=f"{image_folder}"
@@ -115,21 +120,19 @@ class Indexer:
             embeddings = self.load_image_embeddings(embeddings_path.__str__())
             image_embeddings = self.update_image_embeddings(embeddings, image_folder.__str__())
             self.save_image_embeddings(image_embeddings, embeddings_path.__str__())
-            print(f"Updated embeddings and saved to {embeddings_path}")
+            self.info(f"Updated embeddings and saved to {embeddings_path}")
 
         else:
             image_embeddings = self.create_image_embeddings(image_folder.__str__())
             self.save_image_embeddings(image_embeddings, embeddings_path.__str__())
-            print(f"Created embeddings and saved to {embeddings_path}")
+            self.info(f"Created embeddings and saved to {embeddings_path}")
 
 
 def main():
+    logcfg.apply()
     indexer = Indexer()
-
-    for image_folder in [Path(p) for p in sys.argv if Path(p).is_dir()]:
-        indexer.index(image_folder.__str__())
-
-    print("Done")
+    for arg in sys.argv[1:]:
+        indexer.index(arg)
 
 
 if __name__ == "__main__":

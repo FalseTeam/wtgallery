@@ -7,9 +7,9 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from pathlib import Path
 
 import qasync
-from PIL import Image, ImageFile
+from PIL import Image, ImageFile, UnidentifiedImageError
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QImage, QResizeEvent, QCursor, QClipboard
+from PySide6.QtGui import QPixmap, QImage, QResizeEvent, QCursor
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -27,8 +27,11 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from config import EMBEDDINGS_DIR
+from config import EMBEDDINGS_DIR, PROJECT_DIR
 from indexer import Indexer
+from utils import logcfg
+from utils.lazy import Lazy
+from utils.logged import Logged
 
 # If you need to allow truncated images:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -183,7 +186,7 @@ class ImageQueryLineEdit(QLineEdit):
                 # Create temporary directory if it doesn't exist
                 temp_dir = Path(tempfile.gettempdir()) / "image_viewer_queries"
                 temp_dir.mkdir(exist_ok=True)
-                
+
                 # Save previous temporary file if it exists
                 if self.temp_image_path and os.path.exists(self.temp_image_path):
                     try:
@@ -194,11 +197,11 @@ class ImageQueryLineEdit(QLineEdit):
                 # Save new temporary file
                 self.temp_image_path = str(temp_dir / f"pasted_query_{id(self)}.png")
                 image.save(self.temp_image_path, "PNG")
-                
+
                 # Update UI to show image was pasted
                 self.setText("[Pasted Image]")
                 self.selectAll()
-                
+
                 # Trigger search with the pasted image
                 asyncio.create_task(self.viewer.search_similar_images(self.temp_image_path))
 
@@ -211,9 +214,10 @@ class ImageQueryLineEdit(QLineEdit):
                 pass
 
 
-class ClickableImageLabel(QLabel):
+class ClickableImageLabel(QLabel, Logged):
     def __init__(self, image_path: str, viewer, parent=None):
-        super().__init__(parent)
+        QLabel.__init__(self, parent)
+        Logged.__init__(self)
         self.image_path = image_path
         self.viewer = viewer
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -224,8 +228,12 @@ class ClickableImageLabel(QLabel):
         open_action = menu.addAction("Open in Viewer")
         find_similar_action = menu.addAction("Find Similar Images")
         copy_action = menu.addAction("Copy to Clipboard")
-        
+
         action = menu.exec(QCursor.pos())
+        if not action:
+            return
+
+        self.debug(f"{action.text()}: {self.image_path}")
         if action == open_action:
             self.viewer.on_image_click(None, self.image_path)
         elif action == find_similar_action:
@@ -237,11 +245,12 @@ class ClickableImageLabel(QLabel):
                 QApplication.clipboard().setImage(image)
 
 
-class ImageViewer(QMainWindow):
+class ImageViewer(QMainWindow, Logged):
     def __init__(self):
-        super().__init__()
+        QMainWindow.__init__(self)
+        Logged.__init__(self)
 
-        self.executor = ThreadPoolExecutor()
+        self.executor = ThreadPoolExecutor(thread_name_prefix='Viewer-Background')
         self.theme_manager = ThemeManager()
 
         self.indexer = Indexer()
@@ -253,7 +262,7 @@ class ImageViewer(QMainWindow):
             self.loaded_image_embeddings.update(embeddings)
 
         # UI setup
-        self.setWindowTitle("Async Image Gallery (Qt)")
+        self.setWindowTitle("WTGallery")
         self.setGeometry(100, 100, 1600, 800)
 
         self.max_items = 4
@@ -267,16 +276,16 @@ class ImageViewer(QMainWindow):
         # Row 1: Query controls
         #
         query_layout = QHBoxLayout()
-        
+
         # Theme toggle button
         self.theme_button = QPushButton("Toggle Theme")
         self.theme_button.clicked.connect(self.toggle_theme)
         query_layout.addWidget(self.theme_button)
-        
+
         # Query label
         label_query = QLabel("Query:")
         query_layout.addWidget(label_query)
-        
+
         # Query entry with image paste support
         self.query_entry = ImageQueryLineEdit(self)
         self.query_entry.returnPressed.connect(
@@ -338,6 +347,12 @@ class ImageViewer(QMainWindow):
         # Apply initial theme
         self.setStyleSheet(self.theme_manager.get_current_theme())
 
+        self.__no_photo = Lazy(lambda: self.__process_single_image(PROJECT_DIR / 'assets' / 'no_photo.jpg'))
+
+    @property
+    def no_photo(self):
+        return self.__no_photo.get()
+
     def resizeEvent(self, event):
         """
         Overridden to always resize the overlay to cover the entire window.
@@ -353,8 +368,7 @@ class ImageViewer(QMainWindow):
     def hide_overlay(self):
         self.loading_overlay.setVisible(False)
 
-    @staticmethod
-    def open_image_in_viewer(image_path: str) -> None:
+    def open_image_in_viewer(self, image_path: str) -> None:
         """Cross-platform attempt to open image in default viewer."""
         try:
             if os.name == "nt":  # Windows
@@ -364,9 +378,9 @@ class ImageViewer(QMainWindow):
             elif os.name == "posix":  # Linux and other Unix-like
                 subprocess.run(["xdg-open", image_path], check=True)
             else:
-                print("Unsupported OS. Unable to open the image in the default viewer.")
+                self.warning(f"Unsupported OS {os.name} platform {sys.platform}. Unable to open the image outside.")
         except (subprocess.CalledProcessError, OSError) as e:
-            print(f"Error opening image '{image_path}' in the default image viewer: {e}")
+            self.warning(f"Error opening image '{image_path}' in the default image viewer: {e}", exc_info=True)
 
     async def search_and_update_gallery(self):
         """
@@ -423,17 +437,27 @@ class ImageViewer(QMainWindow):
         return results
 
     @staticmethod
-    def process_single_image(image_path):
-        """
-        Called in a background thread. Loads the image, thumbnails it, and returns
-        raw RGBA bytes + the final width/height. We do NOT construct QImage here
-        to avoid cross-thread Qt issues.
-        """
+    def __process_single_image(image_path):
         with Image.open(image_path) as img:
             img.thumbnail((200, 200))
             img = img.convert("RGBA")
             rgba_bytes = img.tobytes("raw", "RGBA")
             return rgba_bytes, img.width, img.height
+
+    def process_single_image(self, image_path):
+        """
+        Called in a background thread. Loads the image, thumbnails it, and returns
+        raw RGBA bytes + the final width/height. We do NOT construct QImage here
+        to avoid cross-thread Qt issues.
+        """
+        try:
+            return self.__process_single_image(image_path)
+        except UnidentifiedImageError as e:
+            self.info(str(e))
+            return self.no_photo
+        except Exception as e:
+            self.warning(str(e), exc_info=e)
+            return self.no_photo
 
     def create_gallery(self, sorted_images, thumbs):
         """
@@ -572,6 +596,7 @@ def main():
     """
     Standard if __name__ == '__main__': approach to run the app with qasync.
     """
+    logcfg.apply()
     app = QApplication(sys.argv)
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)

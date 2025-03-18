@@ -3,6 +3,7 @@ from typing import Dict, List
 
 # noinspection PyPackageRequirements
 import torch
+import tqdm
 from PIL import Image, UnidentifiedImageError
 # noinspection PyPackageRequirements
 from torch import Tensor
@@ -12,13 +13,11 @@ from transformers import CLIPProcessor, CLIPModel
 
 from config import MODELS_DIR
 from models.base import ModelWrapperBase
+from utils.logged import Logged
+from utils.validator import is_image_file
 
 
-def is_image_file(filename: str) -> bool:
-    return any(filename.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif'])
-
-
-class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
+class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor], Logged):
     def __init__(self, name: str, resize: int = 224, batch_size: int = 768):
         """
         Initialize CLIP model
@@ -29,6 +28,7 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
             batch_size (int): Number of images to process in a batch. Defaults to 768. Use 256 batch size for 336 models, other 768
         """
         ModelWrapperBase.__init__(self, name)
+        Logged.__init__(self)
         self.resize = resize
         self.batch_size = batch_size
 
@@ -54,7 +54,7 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
 
             return image
         except UnidentifiedImageError as e:
-            print(f"Error loading image file '{image_path}': {e}")
+            self.warning(f"Error loading: {e}")
             return None
 
     def create_image_embeddings(self, image_folder: str) -> Dict[str, Tensor]:
@@ -115,7 +115,7 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
                 return []
 
             query_image = query_image.to(self.device)
-            
+
             with torch.no_grad():
                 query_features = self.model.to(self.device).get_image_features(pixel_values=query_image)
 
@@ -124,7 +124,7 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
             for image_path, image_features in image_embeddings.items():
                 if image_path == query_image_path:  # Skip the query image itself
                     continue
-                    
+
                 # Move image features to the same device as query features
                 image_features = image_features.to(self.device)
                 # Calculate cosine similarity
@@ -144,32 +144,37 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor]):
     # noinspection PyTypeChecker
     def create_image_embeddings_from_paths(self, image_paths: List[str]) -> Dict[str, Tensor]:
         image_embeddings = dict()
-        for i in range(0, len(image_paths), self.batch_size):
-            # noinspection PyUnusedLocal
-            batch_images, batch_image_features = None, None
 
-            try:
-                batch_image_paths = image_paths[i:i + self.batch_size]
-                _batch_images = [self.load_image(image_path) for image_path in batch_image_paths]
-                batch_images = [image for image in _batch_images if image is not None]  # Exclude None values
+        with tqdm.tqdm(unit='img', total=len(image_paths), ncols=64) as pbar:
 
-                if not batch_images:
-                    continue  # Skip empty batches
+            for i in range(0, len(image_paths), self.batch_size):
+                # noinspection PyUnusedLocal
+                batch_images, batch_image_features = None, None
 
-                batch_images = torch.cat([image.to(self.device) for image in batch_images], dim=0)
+                try:
+                    batch_image_paths = image_paths[i:i + self.batch_size]
+                    _batch_images = [self.load_image(image_path) for image_path in batch_image_paths]
+                    batch_images = [image for image in _batch_images if image is not None]  # Exclude None values
 
-                with torch.no_grad():
-                    # noinspection PyTypeChecker
-                    batch_image_features = self.model.to(self.device).get_image_features(pixel_values=batch_images)
+                    if not batch_images:
+                        continue  # Skip empty batches
 
-                for j, image_path in enumerate(batch_image_paths[:len(batch_images)]):
-                    if batch_images[j] is not None:
-                        image_embeddings[image_path] = batch_image_features[j].cpu()
+                    batch_images = torch.cat([image.to(self.device) for image in batch_images], dim=0)
 
-            finally:
-                del batch_images, batch_image_features
-                # Clean up GPU memory regardless of device type
-                if self.device != 'cpu':
-                    torch.cuda.empty_cache()
+                    with torch.no_grad():
+                        # noinspection PyTypeChecker
+                        batch_image_features = self.model.to(self.device).get_image_features(pixel_values=batch_images)
+
+                    for j, image_path in enumerate(batch_image_paths[:len(batch_images)]):
+                        if batch_images[j] is not None:
+                            image_embeddings[image_path] = batch_image_features[j].cpu()
+
+                    pbar.update(len(batch_image_paths))
+
+                finally:
+                    del batch_images, batch_image_features
+                    # Clean up GPU memory regardless of device type
+                    if self.device != 'cpu':
+                        torch.cuda.empty_cache()
 
         return image_embeddings
