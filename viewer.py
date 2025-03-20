@@ -25,6 +25,12 @@ from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
     QMenu,
+    QDialog,
+    QFileDialog,
+    QListWidget,
+    QMenuBar,
+    QMessageBox,
+    QProgressBar,
 )
 
 from config import EMBEDDINGS_DIR, PROJECT_DIR
@@ -245,6 +251,316 @@ class ClickableImageLabel(QLabel, Logged):
                 QApplication.clipboard().setImage(image)
 
 
+class IndexerSettingsDialog(QDialog, Logged):
+    def __init__(self, parent=None, indexer=None):
+        QDialog.__init__(self, parent)
+        Logged.__init__(self)
+        
+        self.indexer = indexer
+        self.pending_task = None  # Track the running indexing task
+        self.setWindowTitle("Indexer Settings")
+        self.setMinimumWidth(600)
+        self.setMinimumHeight(500)
+        
+        # Main layout
+        layout = QVBoxLayout(self)
+        
+        # Current embeddings info
+        self.embeddings_info_label = QLabel("Current Embeddings:")
+        layout.addWidget(self.embeddings_info_label)
+        
+        self.embeddings_info = QListWidget()
+        self.embeddings_info.setMaximumHeight(150)
+        layout.addWidget(self.embeddings_info)
+        
+        # Load current embeddings info
+        self.load_embeddings_info()
+        
+        # Directories list
+        self.directories_label = QLabel("Directories to index:")
+        layout.addWidget(self.directories_label)
+        
+        self.directories_list = QListWidget()
+        layout.addWidget(self.directories_list)
+        
+        # Buttons for directory management
+        dir_buttons_layout = QHBoxLayout()
+        
+        self.add_dir_button = QPushButton("Add Directory")
+        self.add_dir_button.clicked.connect(self.add_directory)
+        dir_buttons_layout.addWidget(self.add_dir_button)
+        
+        self.remove_dir_button = QPushButton("Remove Directory")
+        self.remove_dir_button.clicked.connect(self.remove_directory)
+        dir_buttons_layout.addWidget(self.remove_dir_button)
+        
+        layout.addLayout(dir_buttons_layout)
+        
+        # Model selection
+        model_layout = QHBoxLayout()
+        
+        self.model_label = QLabel("CLIP Model:")
+        model_layout.addWidget(self.model_label)
+        
+        self.model_combo = QComboBox()
+        self.model_combo.addItem("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", "LaionH14")
+        self.model_combo.addItem("openai/clip-vit-large-patch14", "OpenAILargePatch14")
+        self.model_combo.addItem("openai/clip-vit-large-patch14-336", "OpenAILargePatch14_336")
+        self.model_combo.addItem("openai/clip-vit-base-patch16", "OpenAIBasePatch16")
+        
+        model_layout.addWidget(self.model_combo)
+        
+        layout.addLayout(model_layout)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        
+        # Progress indicator
+        self.progress_label = QLabel("Ready")
+        layout.addWidget(self.progress_label)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.index_button = QPushButton("Start Indexing")
+        self.index_button.clicked.connect(
+            self._start_indexing_clicked
+        )
+        buttons_layout.addWidget(self.index_button)
+        
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        buttons_layout.addWidget(self.close_button)
+        
+        layout.addLayout(buttons_layout)
+    
+    def load_embeddings_info(self):
+        """Load and display information about current embeddings"""
+        self.embeddings_info.clear()
+        
+        try:
+            # Ensure embeddings directory exists
+            if not EMBEDDINGS_DIR.exists():
+                self.info(f"Embeddings directory does not exist: {EMBEDDINGS_DIR}")
+                self.embeddings_info.addItem("No embeddings directory found. It will be created when indexing.")
+                return
+                
+            # Get all embedding files
+            embeddings_files = list(EMBEDDINGS_DIR.glob("*.pt"))
+            
+            if not embeddings_files:
+                self.embeddings_info.addItem("No embeddings found.")
+                return
+                
+            total_images = 0
+            source_stats = {}
+            
+            for file in embeddings_files:
+                try:
+                    # Load embeddings to get count
+                    embeddings = self.indexer.load_image_embeddings(str(file))
+                    num_images = len(embeddings)
+                    total_images += num_images
+                    
+                    # Extract info from filename
+                    source_info = file.stem  # filename without extension
+                    source_stats[source_info] = num_images
+                    
+                    # Add to list with image count
+                    self.embeddings_info.addItem(f"{source_info}: {num_images} images")
+                except Exception as e:
+                    error_msg = f"{file.name}: Error loading ({str(e)})"
+                    self.embeddings_info.addItem(error_msg)
+                    self.error(error_msg, exc_info=e)
+            
+            # Add summary item at the top - prepend to make it first
+            # Get the current items
+            items = []
+            for i in range(self.embeddings_info.count()):
+                items.append(self.embeddings_info.item(i).text())
+            
+            # Clear and re-add with summary first
+            self.embeddings_info.clear()
+            self.embeddings_info.addItem(f"Total: {total_images} images across {len(embeddings_files)} embedding files")
+            
+            # Add back the individual entries
+            for item in items:
+                self.embeddings_info.addItem(item)
+            
+        except Exception as e:
+            error_msg = f"Error loading embeddings info: {str(e)}"
+            self.error(error_msg, exc_info=e)
+            self.embeddings_info.addItem(error_msg)
+    
+    def reload_embeddings_info(self):
+        """Reload the embeddings info after indexing completes"""
+        self.load_embeddings_info()
+    
+    def add_directory(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "Select Directory to Index", str(Path.home())
+        )
+        if dir_path:
+            self.directories_list.addItem(dir_path)
+    
+    def remove_directory(self):
+        selected_items = self.directories_list.selectedItems()
+        for item in selected_items:
+            self.directories_list.takeItem(self.directories_list.row(item))
+    
+    async def start_indexing(self):
+        if self.directories_list.count() == 0:
+            QMessageBox.warning(self, "No Directories", "Please add at least one directory to index.")
+            return
+        
+        # Get selected model
+        model_key = self.model_combo.currentData()
+        
+        # Disable UI elements during indexing
+        self.index_button.setEnabled(False)
+        self.add_dir_button.setEnabled(False)
+        self.remove_dir_button.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.close_button.setEnabled(False)  # Also disable close button
+        
+        self.progress_label.setText("Indexing in progress...")
+        self.progress_bar.setValue(0)
+        
+        # Set the model based on selection
+        from models import CLIP
+        model_map = {
+            "LaionH14": CLIP.LaionH14,
+            "OpenAILargePatch14": CLIP.OpenAILargePatch14,
+            "OpenAILargePatch14_336": CLIP.OpenAILargePatch14_336,
+            "OpenAIBasePatch16": CLIP.OpenAIBasePatch16,
+        }
+        
+        selected_model = model_map.get(model_key, CLIP.LaionH14)
+        self.info(f"Using CLIP model: {model_key} ({selected_model.name})")
+        self.indexer = Indexer(clip_model=selected_model)
+        
+        # Also log the embeddings directory
+        self.info(f"Embeddings will be saved to: {EMBEDDINGS_DIR}")
+        
+        # Ensure embeddings directory exists
+        if not EMBEDDINGS_DIR.exists():
+            self.info(f"Creating embeddings directory: {EMBEDDINGS_DIR}")
+            EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Process each directory
+        loop = asyncio.get_event_loop()
+        new_embeddings_created = False
+        
+        try:
+            total_dirs = self.directories_list.count()
+            for i in range(total_dirs):
+                dir_path = self.directories_list.item(i).text()
+                self.progress_label.setText(f"Indexing: {dir_path}")
+                self.progress_bar.setValue(int((i / total_dirs) * 100))
+                
+                # Check if the directory exists
+                if not Path(dir_path).exists():
+                    self.warning(f"Directory does not exist: {dir_path}")
+                    continue
+                
+                # Run the indexing
+                try:
+                    await loop.run_in_executor(None, self.indexer.index, dir_path)
+                    new_embeddings_created = True
+                    self.progress_label.setText(f"Completed: {dir_path}")
+                except Exception as e:
+                    self.error(f"Error indexing {dir_path}: {str(e)}", exc_info=e)
+                    self.progress_label.setText(f"Error with {dir_path}: {str(e)}")
+                    continue
+                
+                # Update progress after each directory
+                self.progress_bar.setValue(int(((i + 1) / total_dirs) * 100))
+                await asyncio.sleep(0.1)  # Let the UI update
+            
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Indexing completed successfully!")
+            
+            # Reload embeddings info in this dialog
+            self.reload_embeddings_info()
+            
+            # Notify user
+            QMessageBox.information(self, "Indexing Complete", 
+                                  "All directories have been indexed successfully.")
+            
+            # If we have a parent viewer and new embeddings were created, 
+            # suggest the user to refresh the embeddings
+            parent = self.parent()
+            if new_embeddings_created and parent and hasattr(parent, 'reload_embeddings'):
+                reply = QMessageBox.question(
+                    self, 
+                    "Refresh Embeddings", 
+                    "Would you like to refresh the embeddings in the viewer to include the newly indexed images?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                
+                if reply == QMessageBox.StandardButton.Yes:
+                    # Just call sync reload instead of async to avoid nested task issues
+                    parent.reload_embeddings()
+                    if hasattr(parent, 'search_and_update_gallery'):
+                        # Create a task but don't wait for it
+                        asyncio.create_task(parent.search_and_update_gallery())
+            
+        except Exception as e:
+            self.error(f"Error during indexing: {str(e)}", exc_info=e)
+            self.progress_label.setText(f"Error: {str(e)}")
+            QMessageBox.critical(self, "Indexing Error", f"An error occurred during indexing:\n{str(e)}")
+        finally:
+            # Re-enable UI elements if dialog still exists
+            try:
+                self.index_button.setEnabled(True)
+                self.add_dir_button.setEnabled(True)
+                self.remove_dir_button.setEnabled(True)
+                self.model_combo.setEnabled(True)
+                self.close_button.setEnabled(True)  # Re-enable close button
+            except RuntimeError as e:
+                # Dialog might have been closed, ignore
+                self.debug(f"Dialog closed during indexing: {str(e)}")
+                pass
+
+    def closeEvent(self, event):
+        """Handle dialog close event by ensuring any pending tasks are finished."""
+        if self.pending_task and not self.pending_task.done():
+            self.warning("Dialog closing while indexing task is running")
+            # Let the task finish but detach it from the dialog
+            self.pending_task.add_done_callback(self._cleanup_on_task_done)
+        
+        super().closeEvent(event)
+    
+    def _cleanup_on_task_done(self, future):
+        """Callback when a detached task is done - just handle exceptions."""
+        try:
+            future.result()  # This will raise any exception that occurred
+        except Exception as e:
+            self.error(f"Detached indexing task failed: {str(e)}", exc_info=e)
+
+    def _start_indexing_clicked(self):
+        """Handle click on Start Indexing button by creating and storing the task."""
+        # Create the task and store it so we can check its status later
+        self.pending_task = asyncio.create_task(self.start_indexing())
+        # Add a callback so we know when it's done
+        self.pending_task.add_done_callback(self._indexing_task_done)
+    
+    def _indexing_task_done(self, future):
+        """Handle completion of the indexing task."""
+        try:
+            future.result()  # This will raise any exception that occurred
+            self.debug("Indexing task completed successfully")
+        except Exception as e:
+            self.error(f"Indexing task failed: {str(e)}", exc_info=e)
+        finally:
+            self.pending_task = None  # Clear the pending task
+
+
 class ImageViewer(QMainWindow, Logged):
     def __init__(self):
         QMainWindow.__init__(self)
@@ -265,6 +581,9 @@ class ImageViewer(QMainWindow, Logged):
         self.setWindowTitle("WTGallery")
         self.setGeometry(100, 100, 1600, 800)
 
+        # Create menu bar
+        self.create_menu_bar()
+
         self.max_items = 4
 
         # Main container widget + vertical layout
@@ -281,6 +600,14 @@ class ImageViewer(QMainWindow, Logged):
         self.theme_button = QPushButton("Toggle Theme")
         self.theme_button.clicked.connect(self.toggle_theme)
         query_layout.addWidget(self.theme_button)
+
+        # Refresh embeddings button
+        self.refresh_button = QPushButton("Refresh Embeddings")
+        self.refresh_button.clicked.connect(
+            lambda: asyncio.create_task(self.reload_embeddings_and_search())
+        )
+        self.refresh_button.setToolTip("Reload embeddings and refresh search results")
+        query_layout.addWidget(self.refresh_button)
 
         # Query label
         label_query = QLabel("Query:")
@@ -578,6 +905,126 @@ class ImageViewer(QMainWindow, Logged):
             f"color: {'white' if self.theme_manager.is_dark else 'black'}; "
             "font-size: 24px; }"
         )
+
+    def create_menu_bar(self):
+        menu_bar = QMenuBar(self)
+        self.setMenuBar(menu_bar)
+        
+        # File menu
+        file_menu = menu_bar.addMenu("File")
+        
+        # Settings menu item
+        settings_action = file_menu.addAction("Indexer Settings...")
+        settings_action.triggered.connect(self.show_indexer_settings)
+        
+        # Exit menu item
+        exit_action = file_menu.addAction("Exit")
+        exit_action.triggered.connect(self.close)
+    
+    def show_indexer_settings(self):
+        """Show the indexer settings dialog"""
+        # Create dialog as a child of this window
+        dialog = IndexerSettingsDialog(self, self.indexer)
+        
+        # Connect a signal to know when to reload embeddings
+        dialog.accepted.connect(self.reload_embeddings)
+        dialog.finished.connect(self.reload_embeddings)
+        
+        # Show the dialog non-modally to allow async operations to continue
+        dialog.show()
+        
+        # Note: We don't use exec() which would block until dialog is closed
+        # This allows async operations within the dialog to continue
+    
+    def reload_embeddings(self):
+        """Reload all embeddings from disk"""
+        # Ensure embeddings directory exists
+        if not EMBEDDINGS_DIR.exists():
+            self.info(f"Creating embeddings directory: {EMBEDDINGS_DIR}")
+            EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
+            
+        old_embeddings = self.loaded_image_embeddings
+        self.loaded_image_embeddings = {}
+        
+        embedding_stats = {}
+        
+        # Check if there are any embedding files
+        embedding_files = list(EMBEDDINGS_DIR.glob("*.pt"))
+        if not embedding_files:
+            self.warning(f"No embedding files found in {EMBEDDINGS_DIR}")
+            return {}
+            
+        # Load each embedding file
+        for file in embedding_files:
+            try:
+                self.info(f"Loading embeddings from {file}")
+                embeddings = self.indexer.load_image_embeddings(str(file))
+                
+                # Extract source information from filename
+                source_info = file.stem  # filename without extension
+                
+                # Store stats for reporting
+                embedding_stats[source_info] = len(embeddings)
+                
+                # Add to combined embeddings
+                self.loaded_image_embeddings.update(embeddings)
+                
+            except Exception as e:
+                self.error(f"Error loading embeddings from {file}: {str(e)}", exc_info=e)
+        
+        # Log information about loaded embeddings
+        total_embeddings = len(self.loaded_image_embeddings)
+        self.info(f"Loaded {total_embeddings} total embeddings from {len(embedding_stats)} files")
+        
+        # Log details about each source
+        for source, count in embedding_stats.items():
+            self.info(f"  - {source}: {count} embeddings")
+        
+        return embedding_stats
+
+    async def reload_embeddings_and_search(self):
+        """Reload embeddings and update search results"""
+        self.show_overlay()
+        # Let the overlay actually repaint:
+        await asyncio.sleep(0)
+        
+        old_count = len(self.loaded_image_embeddings)
+        stats = self.reload_embeddings()
+        new_count = len(self.loaded_image_embeddings)
+        
+        # Update the search if we have a query
+        if self.query_entry.text().strip():
+            await self.search_and_update_gallery()
+        
+        self.hide_overlay()
+        
+        # Show a message with detailed stats
+        if stats:
+            # Create a detailed message with embeddings from each source
+            message = f"Embeddings refreshed successfully.\n\nTotal images: {new_count}"
+            
+            if new_count != old_count:
+                diff = new_count - old_count
+                if diff > 0:
+                    message += f" (+{diff})"
+                else:
+                    message += f" ({diff})"
+            
+            message += "\n\nDetails:"
+            for source, count in stats.items():
+                message += f"\n• {source}: {count} images"
+                
+            QMessageBox.information(
+                self, 
+                "Embeddings Refreshed", 
+                message
+            )
+        else:
+            QMessageBox.information(
+                self, 
+                "No Embeddings Found", 
+                "No embedding files were found in the embeddings directory."
+            )
 
 
 async def main_async():
