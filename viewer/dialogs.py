@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
@@ -12,7 +13,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QMessageBox,
     QFileDialog,
-    QCheckBox,
+    QCheckBox, QWidget,
 )
 from tqdm import tqdm
 
@@ -22,11 +23,13 @@ from models import CLIP
 from utils.io_utils import run_in_background
 from utils.lazy import LazyParameterized
 from utils.loggerext import LoggerExt
+from viewer.base import ImageViewerExt
 
 
-class IndexerSettingsDialog(QDialog, LoggerExt):
-    def __init__(self, parent=None, indexer=None):
+class IndexerSettingsDialog(QDialog, LoggerExt, ImageViewerExt):
+    def __init__(self, parent: QWidget, indexer: Indexer):
         QDialog.__init__(self, parent)
+        ImageViewerExt.__init__(self, parent)
         LoggerExt.__init__(self)
 
         self.indexer = indexer
@@ -122,16 +125,44 @@ class IndexerSettingsDialog(QDialog, LoggerExt):
             self.error(f"Error loading directories from file: {str(e)}", exc_info=e)
 
     def add_directory(self):
-        dir_path = Path(
-            QFileDialog.getExistingDirectory(self, "Select Directory to Index", str(Path.home()))
-        ).resolve()
-        if dir_path.exists():
-            self.directories_list.addItem(dir_path.__str__())
+        dir_path = QFileDialog.getExistingDirectory(
+            parent=self, caption="Select Directory to Index", dir=str(Path.home()),
+            options=QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.ReadOnly | QFileDialog.Option.HideNameFilterDetails
+        )
+        if dir_path:
+            dir_path = Path(dir_path)
+            if dir_path.is_dir() and not self.directories_list.findItems(str(dir_path), Qt.MatchFlag.MatchExactly):
+                self.directories_list.addItem(str(dir_path))
 
     def remove_directory(self):
-        selected_items = self.directories_list.selectedItems()
-        for item in selected_items:
+        to_remove_dirs = set()
+        for item in self.directories_list.selectedItems():
+            to_remove_dirs.add(Path(item.text()))
             self.directories_list.takeItem(self.directories_list.row(item))
+
+        # Load embeddings to get directories
+        if self.selected_model.filepath.exists():
+            embeddings = self.indexer.load_image_embeddings(self.selected_model.filepath)
+            removed = False
+            for image_path in list(embeddings.keys()):
+                if Path(image_path).parent in to_remove_dirs:
+                    embeddings.pop(image_path, None)
+                    removed = True
+            self.indexer.save_image_embeddings(embeddings, self.selected_model.filepath)
+
+            if removed and QMessageBox.question(
+                    self,
+                    "Refresh Embeddings",
+                    "Would you like to refresh the embeddings in the viewer to update indexed images?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+            ) == QMessageBox.StandardButton.Yes:
+                # Just call sync reload instead of async to avoid nested task issues
+                self.viewer.reload_embeddings()
+                # Create a task but don't wait for it
+                asyncio.create_task(self.viewer.search_and_update_gallery())
+
+        self.on_model_changed()
 
     async def start_indexing(self):
         if self.directories_list.count() == 0:
@@ -160,7 +191,6 @@ class IndexerSettingsDialog(QDialog, LoggerExt):
             EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
         # Process each directory
-        loop = asyncio.get_event_loop()
         new_embeddings_created = False
 
         try:
@@ -209,22 +239,18 @@ class IndexerSettingsDialog(QDialog, LoggerExt):
 
             # If we have a parent viewer and new embeddings were created, 
             # suggest the user to refresh the embeddings
-            parent = self.parent()
-            if new_embeddings_created and parent and hasattr(parent, 'reload_embeddings'):
-                reply = QMessageBox.question(
-                    self,
-                    "Refresh Embeddings",
-                    "Would you like to refresh the embeddings in the viewer to include the newly indexed images?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-                )
-
-                if reply == QMessageBox.StandardButton.Yes:
+            if new_embeddings_created:
+                if QMessageBox.question(
+                        self,
+                        "Refresh Embeddings",
+                        "Would you like to refresh the embeddings in the viewer to include the newly indexed images?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
+                ) == QMessageBox.StandardButton.Yes:
                     # Just call sync reload instead of async to avoid nested task issues
-                    parent.reload_embeddings()
-                    if hasattr(parent, 'search_and_update_gallery'):
-                        # Create a task but don't wait for it
-                        asyncio.create_task(parent.search_and_update_gallery())
+                    self.viewer.reload_embeddings()
+                    # Create a task but don't wait for it
+                    asyncio.create_task(self.viewer.search_and_update_gallery())
 
         except Exception as e:
             self.error(f"Error during indexing: {str(e)}", exc_info=e)
