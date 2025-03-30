@@ -2,7 +2,6 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QCursor
@@ -11,9 +10,6 @@ from PySide6.QtWidgets import QLineEdit, QLabel, QMenu, QApplication
 from utils.io_utils import os_open_file
 from utils.loggerext import LoggerExt
 from .base import ImageViewerExt
-
-if TYPE_CHECKING:
-    pass
 
 
 class ImageQueryLineEdit(QLineEdit, ImageViewerExt):
