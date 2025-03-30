@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from config import EMBEDDINGS_DIR, PROJECT_DIR
 from indexer import Indexer
+from utils.io_utils import run_in_background
 from utils.lazy import Lazy
 from utils.loggerext import LoggerExt
 from .base import ImageViewerInterface
@@ -32,9 +33,7 @@ class ImageViewer(QMainWindow, LoggerExt, ImageViewerInterface):
         QMainWindow.__init__(self)
         LoggerExt.__init__(self)
 
-        self.executor = ThreadPoolExecutor(thread_name_prefix='Viewer-Background')
         self.theme_manager = ThemeManager()
-
         self.indexer = Indexer()
 
         # Preload any/all .pt embeddings on startup
@@ -171,11 +170,9 @@ class ImageViewer(QMainWindow, LoggerExt, ImageViewerInterface):
         #
         # 1) Run your search in a background thread
         #
-        loop = asyncio.get_event_loop()
         # Using partial if your indexer method has signature like `search(query, embeddings_dict)`.
         # Adjust to however you actually do your sorting.
-        sorted_images = await loop.run_in_executor(
-            self.executor,
+        sorted_images = await run_in_background(
             self.indexer.search_images_by_text, self.loaded_image_embeddings, query
         )
 
@@ -201,9 +198,8 @@ class ImageViewer(QMainWindow, LoggerExt, ImageViewerInterface):
         Offload the expensive PIL I/O and .thumbnail(...) to a background thread.
         We return a list of (raw_rgba_bytes, width, height).
         """
-        loop = asyncio.get_event_loop()
         tasks = [
-            loop.run_in_executor(self.executor, self.gallery_widget.process_single_image, path)
+            run_in_background(self.gallery_widget.process_single_image, path)
             for path in image_paths
         ]
         results = await asyncio.gather(*tasks)
@@ -220,9 +216,7 @@ class ImageViewer(QMainWindow, LoggerExt, ImageViewerInterface):
         #
         # 1) Run your search in a background thread
         #
-        loop = asyncio.get_event_loop()
-        sorted_images = await loop.run_in_executor(
-            self.executor,
+        sorted_images = await run_in_background(
             self.indexer.search_images_by_image, self.loaded_image_embeddings, query_image_path
         )
 
