@@ -1,7 +1,7 @@
 import logging
 
 
-class Logged:
+class LoggerExt:
     def __init__(self, log_tag: str | None = None, logger_name: str | None = None):
         self.__logger: logging.Logger = logging.getLogger(logger_name if logger_name else self.__class__.__qualname__)
         self.__log_tag: str = f'[{log_tag}] ' if log_tag else ''
@@ -18,6 +18,9 @@ class Logged:
 
     def __log(self, level: int, msg: object, *args, exc_info=None, **kwargs):
         self.__logger.log(level, f'{self.__log_tag}{msg}'.replace('\n', '\\n'), *args, exc_info=exc_info, **kwargs)
+
+    def log_raw(self, level: int, msg: object, *args, exc_info=None, **kwargs):
+        self.__logger.log(level, f'{self.__log_tag}{msg}', *args, exc_info=exc_info, **kwargs)
 
     def debug(self, msg: object, *args, exc_info=None, **kwargs):
         self.__log(logging.DEBUG, msg, *args, exc_info=exc_info, **kwargs)

@@ -1,36 +1,48 @@
 import os
-import re
-import sys
 from pathlib import Path
 
 # noinspection PyPackageRequirements
 import torch
 
-from config import EMBEDDINGS_DIR
 from models import CLIP
-from utils import logcfg
-from utils.logged import Logged
+from models.base import ProgressCallback
+from utils.loggerext import LoggerExt
 from utils.validator import is_image_file
 
 
-class Indexer(Logged):
+class Indexer(LoggerExt):
 
     def __init__(self, clip_model=CLIP.LaionH14):
-        Logged.__init__(self)
+        LoggerExt.__init__(self)
         self.clip_model_wrapper = clip_model
 
-    def create_image_embeddings(self, image_folder: str, include_subdirs: bool = True) -> dict[str, torch.Tensor]:
-        """Create embeddings for all images in the given folder and optionally its subdirectories."""
-        image_paths = []
+    @staticmethod
+    def scan_directory(image_folder: str, include_subdirs: bool = True):
         if include_subdirs:
+            images = list()
             for root, _, files in os.walk(image_folder):
                 for file in files:
                     if is_image_file(file):
-                        image_paths.append(os.path.join(root, file))
+                        images.append(os.path.join(root, file))
         else:
-            image_paths = [os.path.join(image_folder, file) for file in os.listdir(image_folder) if is_image_file(file)]
+            images = [os.path.join(image_folder, file) for file in os.listdir(image_folder) if is_image_file(file)]
+        return images
 
-        return self.clip_model_wrapper.create_image_embeddings_from_paths(image_paths)
+    def create_image_embeddings(
+            self,
+            image_folders: list[str],
+            include_subdirs: bool = True,
+            progress_callback: ProgressCallback = None
+    ) -> dict[str, torch.Tensor]:
+        """
+        Create embeddings for all images in the given folder and optionally its subdirectories.
+        """
+        image_paths = [
+            image_path
+            for image_folder in image_folders
+            for image_path in self.scan_directory(image_folder, include_subdirs)
+        ]
+        return self.clip_model_wrapper.create_image_embeddings_from_paths(image_paths, progress_callback)
 
     def search_images_by_text(
             self,
@@ -69,35 +81,25 @@ class Indexer(Logged):
     def update_image_embeddings(
             self,
             existing_embeddings: dict[str, torch.Tensor],
-            image_folder: str,
-            include_subdirs: bool = True
+            image_folders: list[str],
+            include_subdirs: bool = True,
+            progress_callback: ProgressCallback = None
     ) -> dict[str, torch.Tensor]:
         """
         Update image embeddings by processing new images in the specified folder.
-
-        Args:
-            existing_embeddings (dict[str, torch.Tensor]): Current image embeddings.
-            image_folder (str): Path to the folder containing images.
-            include_subdirs (bool): Whether to include images from subdirectories.
-
         Returns:
             dict[str, torch.Tensor]: Updated dictionary of image embeddings including new images.
         """
         current_image_paths = set(existing_embeddings.keys())
 
-        # Get all image paths based on include_subdirs setting
-        if include_subdirs:
-            new_image_paths = set()
-            for root, _, files in os.walk(image_folder):
-                for file in files:
-                    if is_image_file(file):
-                        new_image_paths.add(os.path.join(root, file))
-        else:
-            new_image_paths = {os.path.join(image_folder, file) for file in os.listdir(image_folder) if
-                               is_image_file(file)}
+        new_image_paths = [
+            image_path
+            for image_folder in image_folders
+            for image_path in self.scan_directory(image_folder, include_subdirs)
+        ]
 
         # Find the images that need to be added to the existing embeddings
-        images_to_add = new_image_paths - current_image_paths
+        images_to_add = set(new_image_paths) - current_image_paths
 
         if not images_to_add:
             self.info("No new images to be processed")
@@ -105,7 +107,9 @@ class Indexer(Logged):
 
         self.info(f"Found {len(images_to_add)} new images to be processed")
 
-        new_embeddings = self.clip_model_wrapper.create_image_embeddings_from_paths(list(images_to_add))
+        new_embeddings = self.clip_model_wrapper.create_image_embeddings_from_paths(
+            list(images_to_add), progress_callback
+        )
 
         # Merge the existing and new embeddings
         updated_embeddings = {**existing_embeddings, **new_embeddings}
@@ -114,54 +118,45 @@ class Indexer(Logged):
         return updated_embeddings
 
     @staticmethod
-    def save_image_embeddings(image_embeddings: dict[str, torch.Tensor], save_path: str) -> None:
-        torch.save(image_embeddings, save_path)
+    def save_image_embeddings(image_embeddings: dict[str, torch.Tensor], save_path: str | Path) -> None:
+        torch.save(image_embeddings, str(save_path))
 
     @staticmethod
-    def load_image_embeddings(load_path: str) -> dict[str, torch.Tensor]:
-        image_embeddings = torch.load(load_path)
+    def load_image_embeddings(load_path: str | Path) -> dict[str, torch.Tensor]:
+        image_embeddings = torch.load(str(load_path))
         return image_embeddings
 
-    def index(self, image_folder: str, include_subdirs: bool = True):
+    def index(self,
+              image_folders: list[str | Path],
+              include_subdirs: bool = True,
+              progress_callback: ProgressCallback = None):
         """
         Index images in the given folder and optionally its subdirectories.
-        
-        Args:
-            image_folder (str): Path to the folder containing images.
-            include_subdirs (bool): Whether to include images from subdirectories.
         """
-        image_folder = Path(image_folder)
-        if not image_folder.is_dir():
-            self.warning(f"Directory not found: {image_folder}")
+
+        not_found_count = 0
+
+        for image_folder in image_folders:
+            image_folder = Path(image_folder)
+            if not image_folder.is_dir():
+                not_found_count += 1
+                self.warning(f"Directory not found: {image_folder}")
+
+        if len(image_folders) == not_found_count:
+            self.warning("No processable directories found")
             return
 
-        self.info(f"Processing {image_folder}")
-        embeddings_name = re.sub(
-            pattern=r'[ ,.:()\[\]{}\\/]+', repl='-',
-            string=f"{image_folder}"
-                   f"_{self.clip_model_wrapper.name}"
-                   f"_{self.clip_model_wrapper.device}"
-                   f"_batch-{self.clip_model_wrapper.batch_size}",
-        )
-        embeddings_path = EMBEDDINGS_DIR.joinpath(embeddings_name).with_suffix('.pt')
-
+        embeddings_path = self.clip_model_wrapper.filepath
         if embeddings_path.exists():
-            embeddings = self.load_image_embeddings(embeddings_path.__str__())
-            image_embeddings = self.update_image_embeddings(embeddings, image_folder.__str__(), include_subdirs)
-            self.save_image_embeddings(image_embeddings, embeddings_path.__str__())
+            embeddings = self.load_image_embeddings(embeddings_path)
+            image_embeddings = self.update_image_embeddings(
+                embeddings, image_folders, include_subdirs, progress_callback
+            )
+            self.save_image_embeddings(image_embeddings, embeddings_path)
             self.info(f"Updated embeddings and saved to {embeddings_path}")
         else:
-            image_embeddings = self.create_image_embeddings(image_folder.__str__(), include_subdirs)
-            self.save_image_embeddings(image_embeddings, embeddings_path.__str__())
+            image_embeddings = self.create_image_embeddings(
+                image_folders, include_subdirs, progress_callback
+            )
+            self.save_image_embeddings(image_embeddings, embeddings_path)
             self.info(f"Created embeddings and saved to {embeddings_path}")
-
-
-def main():
-    logcfg.apply()
-    indexer = Indexer()
-    for arg in sys.argv[1:]:
-        indexer.index(arg)
-
-
-if __name__ == "__main__":
-    main()

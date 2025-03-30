@@ -1,9 +1,9 @@
 import os
+import re
 from typing import Dict, List
 
 # noinspection PyPackageRequirements
 import torch
-import tqdm
 from PIL import Image, UnidentifiedImageError
 # noinspection PyPackageRequirements
 from torch import Tensor
@@ -11,13 +11,18 @@ from torch import Tensor
 from torchvision import transforms
 from transformers import CLIPProcessor, CLIPModel
 
-from config import MODELS_DIR
-from models.base import ModelWrapperBase
-from utils.logged import Logged
+from config import MODELS_DIR, EMBEDDINGS_DIR
+from models.base import ModelWrapperBase, ProgressCallback
+from utils.loggerext import LoggerExt
 from utils.validator import is_image_file
 
+# Disable the limit by setting it to None
+# Or increase it to a higher value, e.g.
+# Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
+Image.MAX_IMAGE_PIXELS = None
 
-class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor], Logged):
+
+class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor], LoggerExt):
     def __init__(self, name: str, resize: int = 224, batch_size: int = 768):
         """
         Initialize CLIP model
@@ -28,7 +33,7 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor], Logged):
             batch_size (int): Number of images to process in a batch. Defaults to 768. Use 256 batch size for 336 models, other 768
         """
         ModelWrapperBase.__init__(self, name)
-        Logged.__init__(self)
+        LoggerExt.__init__(self)
         self.resize = resize
         self.batch_size = batch_size
 
@@ -142,39 +147,50 @@ class CLIPModelWrapper(ModelWrapperBase[CLIPModel, CLIPProcessor], Logged):
                 torch.cuda.empty_cache()
 
     # noinspection PyTypeChecker
-    def create_image_embeddings_from_paths(self, image_paths: List[str]) -> Dict[str, Tensor]:
+    def create_image_embeddings_from_paths(
+            self,
+            image_paths: List[str],
+            progress_callback: ProgressCallback = None
+    ) -> Dict[str, Tensor]:
         image_embeddings = dict()
 
-        with tqdm.tqdm(unit='img', total=len(image_paths), ncols=64) as pbar:
+        total = len(image_paths)
+        current = 0
+        progress_callback(current, total)
 
-            for i in range(0, len(image_paths), self.batch_size):
-                # noinspection PyUnusedLocal
-                batch_images, batch_image_features = None, None
+        for i in range(0, len(image_paths), self.batch_size):
+            # noinspection PyUnusedLocal
+            batch_images, batch_image_features = None, None
 
-                try:
-                    batch_image_paths = image_paths[i:i + self.batch_size]
-                    _batch_images = [self.load_image(image_path) for image_path in batch_image_paths]
-                    batch_images = [image for image in _batch_images if image is not None]  # Exclude None values
+            try:
+                batch_image_paths = image_paths[i:i + self.batch_size]
+                _batch_images = [self.load_image(image_path) for image_path in batch_image_paths]
+                batch_images = [image for image in _batch_images if image is not None]  # Exclude None values
 
-                    if not batch_images:
-                        continue  # Skip empty batches
+                if not batch_images:
+                    continue  # Skip empty batches
 
-                    batch_images = torch.cat([image.to(self.device) for image in batch_images], dim=0)
+                batch_images = torch.cat([image.to(self.device) for image in batch_images], dim=0)
 
-                    with torch.no_grad():
-                        # noinspection PyTypeChecker
-                        batch_image_features = self.model.to(self.device).get_image_features(pixel_values=batch_images)
+                with torch.no_grad():
+                    # noinspection PyTypeChecker
+                    batch_image_features = self.model.to(self.device).get_image_features(pixel_values=batch_images)
 
-                    for j, image_path in enumerate(batch_image_paths[:len(batch_images)]):
-                        if batch_images[j] is not None:
-                            image_embeddings[image_path] = batch_image_features[j].cpu()
+                for j, image_path in enumerate(batch_image_paths[:len(batch_images)]):
+                    if batch_images[j] is not None:
+                        image_embeddings[image_path] = batch_image_features[j].cpu()
 
-                    pbar.update(len(batch_image_paths))
+                current += len(batch_image_paths)
+                progress_callback(current, total)
 
-                finally:
-                    del batch_images, batch_image_features
-                    # Clean up GPU memory regardless of device type
-                    if self.device != 'cpu':
-                        torch.cuda.empty_cache()
+            finally:
+                del batch_images, batch_image_features
+                # Clean up GPU memory regardless of device type
+                if self.device != 'cpu':
+                    torch.cuda.empty_cache()
 
         return image_embeddings
+
+    @property
+    def filepath(self):
+        return EMBEDDINGS_DIR.joinpath(re.sub(r'[ ,.:()\[\]{}\\/]+', '-', self.name)).with_suffix('.pt')

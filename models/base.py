@@ -1,6 +1,7 @@
-from abc import ABC
-from typing import Generic, TypeVar
 import sys
+from abc import ABC
+from typing import Generic, TypeVar, Protocol
+
 import torch
 
 from utils.lazy import Lazy
@@ -42,3 +43,7 @@ class ModelWrapperBase(ABC, Generic[_TModel, _TProcessor]):
 
     def load_processor(self):
         ...
+
+
+class ProgressCallback(Protocol):
+    def __call__(self, current: int, total: int) -> None: ...

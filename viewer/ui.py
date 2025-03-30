@@ -1,7 +1,4 @@
 import asyncio
-import os
-import subprocess
-import sys
 from concurrent.futures.thread import ThreadPoolExecutor
 
 from PySide6.QtCore import Qt
@@ -22,17 +19,18 @@ from PySide6.QtWidgets import (
 from config import EMBEDDINGS_DIR, PROJECT_DIR
 from indexer import Indexer
 from utils.lazy import Lazy
-from utils.logged import Logged
+from utils.loggerext import LoggerExt
+from .base import ImageViewerInterface
 from .components import ImageQueryLineEdit
 from .dialogs import IndexerSettingsDialog
 from .gallery import GalleryWidget
 from .theme import ThemeManager
 
 
-class ImageViewer(QMainWindow, Logged):
+class ImageViewer(QMainWindow, LoggerExt, ImageViewerInterface):
     def __init__(self):
         QMainWindow.__init__(self)
-        Logged.__init__(self)
+        LoggerExt.__init__(self)
 
         self.executor = ThreadPoolExecutor(thread_name_prefix='Viewer-Background')
         self.theme_manager = ThemeManager()
@@ -157,20 +155,6 @@ class ImageViewer(QMainWindow, Logged):
     def hide_overlay(self):
         self.loading_overlay.setVisible(False)
 
-    def open_image_in_viewer(self, image_path: str) -> None:
-        """Cross-platform attempt to open image in default viewer."""
-        try:
-            if os.name == "nt":  # Windows
-                os.startfile(image_path)
-            elif sys.platform == "darwin":  # macOS
-                subprocess.run(["open", image_path], check=True)
-            elif os.name == "posix":  # Linux and other Unix-like
-                subprocess.run(["xdg-open", image_path], check=True)
-            else:
-                self.warning(f"Unsupported OS {os.name} platform {sys.platform}. Unable to open the image outside.")
-        except (subprocess.CalledProcessError, OSError) as e:
-            self.warning(f"Error opening image '{image_path}' in the default image viewer: {e}", exc_info=True)
-
     async def search_and_update_gallery(self):
         """
         Perform the embedding-based search in a background thread,
@@ -258,10 +242,6 @@ class ImageViewer(QMainWindow, Logged):
         self.scroll_area.verticalScrollBar().setValue(0)
 
         self.hide_overlay()
-
-    def on_image_click(self, _, image_path):
-        """Called when the user clicks on an image label."""
-        self.open_image_in_viewer(image_path)
 
     def toggle_theme(self):
         """Toggle between light and dark themes"""

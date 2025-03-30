@@ -6,17 +6,17 @@ from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtWidgets import QWidget, QGridLayout, QLabel, QFrame, QSizePolicy, QVBoxLayout
 
 from config import PROJECT_DIR
-from utils.logged import Logged
+from utils.loggerext import LoggerExt
 from .components import ClickableImageLabel
 
 # If you need to allow truncated images:
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
-class GalleryWidget(QWidget, Logged):
+class GalleryWidget(QWidget, LoggerExt):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
-        Logged.__init__(self)
+        LoggerExt.__init__(self)
 
         self.layout = QGridLayout(self)
         self.layout.setContentsMargins(10, 10, 10, 10)
@@ -74,7 +74,7 @@ class GalleryWidget(QWidget, Logged):
             pixmap = QPixmap.fromImage(qimage)
 
             # Use our custom ClickableImageLabel instead of QLabel
-            image_label = ClickableImageLabel(image_path, self.parent())
+            image_label = ClickableImageLabel(image_path, self)
             image_label.setPixmap(pixmap)
             image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cell_frame.layout().addWidget(image_label)

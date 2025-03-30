@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -15,16 +14,20 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
 )
+from tqdm import tqdm
 
 from config import EMBEDDINGS_DIR
 from indexer import Indexer
-from utils.logged import Logged
+from models import CLIP
+from utils.io_utils import run_in_background
+from utils.lazy import LazyParameterized
+from utils.loggerext import LoggerExt
 
 
-class IndexerSettingsDialog(QDialog, Logged):
+class IndexerSettingsDialog(QDialog, LoggerExt):
     def __init__(self, parent=None, indexer=None):
         QDialog.__init__(self, parent)
-        Logged.__init__(self)
+        LoggerExt.__init__(self)
 
         self.indexer = indexer
         self.pending_task = None  # Track the running indexing task
@@ -35,31 +38,23 @@ class IndexerSettingsDialog(QDialog, Logged):
         # Main layout
         layout = QVBoxLayout(self)
 
-        # Current embeddings info
-        self.embeddings_info_label = QLabel("Current Embeddings:")
-        layout.addWidget(self.embeddings_info_label)
+        # Model selection
+        model_layout = QHBoxLayout()
 
-        # Add total images count label
-        self.total_images_label = QLabel("Total: 0 images across 0 embedding files")
-        layout.addWidget(self.total_images_label)
+        self.model_label = QLabel("CLIP Model:")
+        model_layout.addWidget(self.model_label)
 
-        self.embeddings_info = QListWidget()
-        self.embeddings_info.setMaximumHeight(150)
-        # self.embeddings_info.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)  # Enable multiple selection
-        layout.addWidget(self.embeddings_info)
+        self.model_combo = QComboBox()
+        self.model_combo.addItem("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", "LaionH14")
+        self.model_combo.addItem("openai/clip-vit-large-patch14", "OpenAILargePatch14")
+        self.model_combo.addItem("openai/clip-vit-large-patch14-336", "OpenAILargePatch14_336")
+        self.model_combo.addItem("openai/clip-vit-base-patch16", "OpenAIBasePatch16")
+        self.model_combo.currentIndexChanged.connect(self.on_model_changed)
+        model_layout.addWidget(self.model_combo)
 
-        # Add remove embeddings button
-        self.remove_embeddings_button = QPushButton("Remove Selected Embeddings")
-        self.remove_embeddings_button.clicked.connect(self.remove_selected_embeddings)
-        layout.addWidget(self.remove_embeddings_button)
-
-        # Load current embeddings info
-        self.load_embeddings_info()
+        layout.addLayout(model_layout)
 
         # Directories list
-        self.directories_label = QLabel("Directories to index:")
-        layout.addWidget(self.directories_label)
-
         self.directories_list = QListWidget()
         layout.addWidget(self.directories_list)
 
@@ -76,32 +71,13 @@ class IndexerSettingsDialog(QDialog, Logged):
 
         layout.addLayout(dir_buttons_layout)
 
-        # Model selection
-        model_layout = QHBoxLayout()
-
-        self.model_label = QLabel("CLIP Model:")
-        model_layout.addWidget(self.model_label)
-
-        self.model_combo = QComboBox()
-        self.model_combo.addItem("laion/CLIP-ViT-H-14-laion2B-s32B-b79K", "LaionH14")
-        self.model_combo.addItem("openai/clip-vit-large-patch14", "OpenAILargePatch14")
-        self.model_combo.addItem("openai/clip-vit-large-patch14-336", "OpenAILargePatch14_336")
-        self.model_combo.addItem("openai/clip-vit-base-patch16", "OpenAIBasePatch16")
-
-        model_layout.addWidget(self.model_combo)
-
-        layout.addLayout(model_layout)
-
         # Subdirectories checkbox
         self.include_subdirs_checkbox = QCheckBox("Include subdirectories")
         self.include_subdirs_checkbox.setChecked(True)  # Default to True
         layout.addWidget(self.include_subdirs_checkbox)
 
         # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
+        self.progress_bar = QProgressBar(textVisible=False, minimum=0, maximum=100, value=0)
         layout.addWidget(self.progress_bar)
 
         # Progress indicator
@@ -112,9 +88,7 @@ class IndexerSettingsDialog(QDialog, Logged):
         buttons_layout = QHBoxLayout()
 
         self.index_button = QPushButton("Start Indexing")
-        self.index_button.clicked.connect(
-            self._start_indexing_clicked
-        )
+        self.index_button.clicked.connect(self._start_indexing_clicked)
         buttons_layout.addWidget(self.index_button)
 
         self.close_button = QPushButton("Close")
@@ -123,76 +97,36 @@ class IndexerSettingsDialog(QDialog, Logged):
 
         layout.addLayout(buttons_layout)
 
-    def load_embeddings_info(self):
-        """Load and display information about current embeddings"""
-        self.embeddings_info.clear()
+        self.on_model_changed()
+
+    def on_model_changed(self):
+        """Handle model selection change"""
+        self.directories_list.clear()
 
         try:
-            # Ensure embeddings directory exists
-            if not EMBEDDINGS_DIR.exists():
-                self.info(f"Embeddings directory does not exist: {EMBEDDINGS_DIR}")
-                self.total_images_label.setText("Total: 0 images across 0 embedding files")
-                self.embeddings_info.addItem("No embeddings directory found. It will be created when indexing.")
-                return
+            # Load embeddings to get directories
+            if self.selected_model.filepath.exists():
+                embeddings = self.indexer.load_image_embeddings(self.selected_model.filepath)
 
-            # Get all embedding files
-            embeddings_files = list(EMBEDDINGS_DIR.glob("*.pt"))
+                # Extract unique directories from image paths
+                unique_dirs = set()
+                for image_path in embeddings.keys():
+                    dir_path = str(Path(image_path).parent)
+                    unique_dirs.add(dir_path)
 
-            if not embeddings_files:
-                self.total_images_label.setText("Total: 0 images across 0 embedding files")
-                self.embeddings_info.addItem("No embeddings found.")
-                return
-
-            total_images = 0
-            source_stats = {}
-
-            for file in embeddings_files:
-                try:
-                    # Load embeddings to get count and paths
-                    embeddings = self.indexer.load_image_embeddings(str(file))
-                    num_images = len(embeddings)
-                    total_images += num_images
-
-                    # Extract info from filename
-                    source_info = file.stem  # filename without extension
-                    source_stats[source_info] = num_images
-
-                    # Extract unique directories from image paths
-                    unique_dirs = set()
-                    for image_path in embeddings.keys():
-                        dir_path = str(Path(image_path).parent)
-                        unique_dirs.add(dir_path)
-
-                    # Format directory info
-                    dir_info = " (" + ', '.join(unique_dirs) + ")"
-
-                    # Add to list with image count and directory info
-                    self.embeddings_info.addItem(f"{source_info}: {num_images} images{dir_info}")
-                except Exception as e:
-                    error_msg = f"{file.name}: Error loading ({str(e)})"
-                    self.embeddings_info.addItem(error_msg)
-                    self.error(error_msg, exc_info=e)
-
-            # Update the total images label
-            self.total_images_label.setText(
-                f"Total: {total_images} images across {len(embeddings_files)} embedding files")
+                # Add directories to list
+                for dir_path in sorted(unique_dirs):
+                    self.directories_list.addItem(dir_path)
 
         except Exception as e:
-            error_msg = f"Error loading embeddings info: {str(e)}"
-            self.error(error_msg, exc_info=e)
-            self.total_images_label.setText("Total: Error loading embeddings")
-            self.embeddings_info.addItem(error_msg)
-
-    def reload_embeddings_info(self):
-        """Reload the embeddings info after indexing completes"""
-        self.load_embeddings_info()
+            self.error(f"Error loading directories from file: {str(e)}", exc_info=e)
 
     def add_directory(self):
-        dir_path = QFileDialog.getExistingDirectory(
-            self, "Select Directory to Index", str(Path.home())
-        )
-        if dir_path:
-            self.directories_list.addItem(dir_path)
+        dir_path = Path(
+            QFileDialog.getExistingDirectory(self, "Select Directory to Index", str(Path.home()))
+        ).resolve()
+        if dir_path.exists():
+            self.directories_list.addItem(dir_path.__str__())
 
     def remove_directory(self):
         selected_items = self.directories_list.selectedItems()
@@ -204,31 +138,18 @@ class IndexerSettingsDialog(QDialog, Logged):
             QMessageBox.warning(self, "No Directories", "Please add at least one directory to index.")
             return
 
-        # Get selected model
-        model_key = self.model_combo.currentData()
-
         # Disable UI elements during indexing
         self.index_button.setEnabled(False)
         self.add_dir_button.setEnabled(False)
         self.remove_dir_button.setEnabled(False)
         self.model_combo.setEnabled(False)
-        self.close_button.setEnabled(False)  # Also disable close button
+        self.close_button.setEnabled(False)
 
         self.progress_label.setText("Indexing in progress...")
         self.progress_bar.setValue(0)
 
-        # Set the model based on selection
-        from models import CLIP
-        model_map = {
-            "LaionH14": CLIP.LaionH14,
-            "OpenAILargePatch14": CLIP.OpenAILargePatch14,
-            "OpenAILargePatch14_336": CLIP.OpenAILargePatch14_336,
-            "OpenAIBasePatch16": CLIP.OpenAIBasePatch16,
-        }
-
-        selected_model = model_map.get(model_key, CLIP.LaionH14)
-        self.info(f"Using CLIP model: {model_key} ({selected_model.name})")
-        self.indexer = Indexer(clip_model=selected_model)
+        self.info(f"Using CLIP model: {self.selected_model.name}")
+        self.indexer = Indexer(clip_model=self.selected_model)
 
         # Also log the embeddings directory
         self.info(f"Embeddings will be saved to: {EMBEDDINGS_DIR}")
@@ -244,79 +165,42 @@ class IndexerSettingsDialog(QDialog, Logged):
 
         try:
             total_dirs = self.directories_list.count()
-            for i in range(total_dirs):
-                dir_path = self.directories_list.item(i).text()
-                self.progress_label.setText(f"Indexing: {dir_path}")
-                self.progress_bar.setValue(int((i / total_dirs) * 100))
+            dir_paths = set(Path(self.directories_list.item(i).text()) for i in range(self.directories_list.count()))
 
-                # Check if the directory exists
-                if not Path(dir_path).exists():
-                    self.warning(f"Directory does not exist: {dir_path}")
-                    continue
+            # Extract unique directories from image paths
+            if self.selected_model.filepath.exists():
+                embeddings = self.indexer.load_image_embeddings(self.selected_model.filepath)
+                existing_dirs = set(Path(image_path).parent for image_path in embeddings.keys())
 
-                # Run the indexing
-                try:
-                    include_subdirs = self.include_subdirs_checkbox.isChecked()
+                to_delete = existing_dirs - dir_paths
+                to_append = dir_paths - existing_dirs
+            else:
+                to_delete = set()
+                to_append = set(dir_paths)
 
-                    # Create a filename that includes directory information
-                    dir_path_obj = Path(dir_path)
-                    if include_subdirs:
-                        # If including subdirs, use the base directory name
-                        filename = dir_path_obj.name
-                    else:
-                        # If not including subdirs, use the full path with __ separators
-                        filename = '__'.join(dir_path_obj.parts)
+            pbar: LazyParameterized[tqdm, int] = LazyParameterized(lambda t: tqdm(unit='img', total=t, ncols=64))
 
-                    # Set the output filename in the indexer
-                    self.indexer.output_filename = filename
+            def progress_callback(current: int, total: int):
+                nonlocal pbar
+                pbar(total).update(current - pbar(total).pos)
+                if self.progress_bar.maximum() != total:
+                    self.progress_bar.setMaximum(total)
+                if self.progress_bar.value() != current:
+                    self.progress_bar.setValue(current)
 
-                    await loop.run_in_executor(None, self.indexer.index, dir_path, include_subdirs)
-                    new_embeddings_created = True
-                    self.progress_label.setText(f"Completed: {dir_path}")
+            # Run the indexing
+            try:
+                include_subdirs = self.include_subdirs_checkbox.isChecked()
+                await run_in_background(self.indexer.index, list(to_append), include_subdirs, progress_callback)
+                new_embeddings_created = True
+                self.progress_label.setText("Completed")
 
-                    # Save metadata about indexed directories
-                    import json
-                    metadata_file = EMBEDDINGS_DIR / f"{Path(dir_path).name}.meta.json"
-                    metadata = {
-                        'indexed_directories': [dir_path],
-                        'include_subdirs': include_subdirs,
-                        'model': model_key,
-                        'timestamp': str(datetime.datetime.now())
-                    }
-
-                    # If metadata file exists, merge with existing data
-                    if metadata_file.exists():
-                        with open(metadata_file, 'r') as f:
-                            existing_metadata = json.load(f)
-                            # Add new directory if not already present
-                            if dir_path not in existing_metadata.get('indexed_directories', []):
-                                existing_metadata['indexed_directories'].append(dir_path)
-                            # Update other fields
-                            existing_metadata.update({
-                                'include_subdirs': include_subdirs,
-                                'model': model_key,
-                                'timestamp': str(datetime.datetime.now())
-                            })
-                            metadata = existing_metadata
-
-                    # Save the metadata
-                    with open(metadata_file, 'w') as f:
-                        json.dump(metadata, f, indent=2)
-
-                except Exception as e:
-                    self.error(f"Error indexing {dir_path}: {str(e)}", exc_info=e)
-                    self.progress_label.setText(f"Error with {dir_path}: {str(e)}")
-                    continue
-
-                # Update progress after each directory
-                self.progress_bar.setValue(int(((i + 1) / total_dirs) * 100))
-                await asyncio.sleep(0.1)  # Let the UI update
+            except Exception as e:
+                self.error(f"Error indexing: {str(e)}", exc_info=e)
+                self.progress_label.setText(f"Error: {str(e)}")
 
             self.progress_bar.setValue(100)
             self.progress_label.setText("Indexing completed successfully!")
-
-            # Reload embeddings info in this dialog
-            self.reload_embeddings_info()
 
             # Notify user
             QMessageBox.information(self, "Indexing Complete",
@@ -392,45 +276,6 @@ class IndexerSettingsDialog(QDialog, Logged):
         finally:
             self.pending_task = None  # Clear the pending task
 
-    def remove_selected_embeddings(self):
-        """Remove selected embedding files and update the list."""
-        selected_items = self.embeddings_info.selectedItems()
-        if not selected_items:
-            QMessageBox.warning(self, "No Selection", "Please select embeddings to remove.")
-            return
-
-        # Skip the first item if it's the summary
-        items_to_remove = []
-        for item in selected_items:
-            text = item.text()
-            if not text.startswith("Total:"):  # Skip the summary line
-                # Extract the source info (everything before the colon)
-                source_info = text.split(":")[0]
-                items_to_remove.append(source_info)
-
-        if not items_to_remove:
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Confirm Removal",
-            f"Are you sure you want to remove {len(items_to_remove)} embedding file(s)?\nThis action cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            for source_info in items_to_remove:
-                try:
-                    # Find and remove the embedding file
-                    embedding_file = EMBEDDINGS_DIR / f"{source_info}.pt"
-                    if embedding_file.exists():
-                        embedding_file.unlink()
-                        self.info(f"Removed embedding file: {embedding_file}")
-                    else:
-                        self.warning(f"Embedding file not found: {embedding_file}")
-                except Exception as e:
-                    self.error(f"Error removing embedding file {source_info}: {str(e)}", exc_info=e)
-
-            # Reload the embeddings info to update the display
-            self.load_embeddings_info()
+    @property
+    def selected_model(self):
+        return CLIP.get_by_name(self.model_combo.currentData())

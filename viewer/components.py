@@ -2,18 +2,24 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QCursor
 from PySide6.QtWidgets import QLineEdit, QLabel, QMenu, QApplication
 
-from utils.logged import Logged
+from utils.io_utils import os_open_file
+from utils.loggerext import LoggerExt
+from .base import ImageViewerExt
+
+if TYPE_CHECKING:
+    pass
 
 
-class ImageQueryLineEdit(QLineEdit):
-    def __init__(self, viewer, parent=None):
-        super().__init__(parent)
-        self.viewer = viewer
+class ImageQueryLineEdit(QLineEdit, ImageViewerExt):
+    def __init__(self, parent=None):
+        QLineEdit.__init__(self, parent=parent)
+        ImageViewerExt.__init__(self, parent)
         self.setPlaceholderText("Enter text query or paste an image (Ctrl+V/Cmd+V)")
         self.temp_image_path = None
 
@@ -45,6 +51,7 @@ class ImageQueryLineEdit(QLineEdit):
 
                 # Save new temporary file
                 self.temp_image_path = str(temp_dir / f"pasted_query_{id(self)}.png")
+                # noinspection PyTypeChecker
                 image.save(self.temp_image_path, "PNG")
 
                 # Update UI to show image was pasted
@@ -63,14 +70,17 @@ class ImageQueryLineEdit(QLineEdit):
                 pass
 
 
-class ClickableImageLabel(QLabel, Logged):
-    def __init__(self, image_path: str, viewer, parent=None):
+class ClickableImageLabel(QLabel, LoggerExt, ImageViewerExt):
+    def __init__(self, image_path: str, parent=None):
         QLabel.__init__(self, parent)
-        Logged.__init__(self)
+        ImageViewerExt.__init__(self, parent)
+        LoggerExt.__init__(self)
         self.image_path = image_path
-        self.viewer = viewer
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
+
+    def mouseDoubleClickEvent(self, event):
+        os_open_file(self.image_path)
 
     def show_context_menu(self, position):
         menu = QMenu()
@@ -84,7 +94,7 @@ class ClickableImageLabel(QLabel, Logged):
 
         self.debug(f"{action.text()}: {self.image_path}")
         if action == open_action:
-            self.viewer.on_image_click(None, self.image_path)
+            os_open_file(self.image_path)
         elif action == find_similar_action:
             asyncio.create_task(self.viewer.search_similar_images(self.image_path))
         elif action == copy_action:
